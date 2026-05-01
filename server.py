@@ -59,7 +59,7 @@ def count_cars():
 
         vehicle_count = 0
         last_count_time = 0
-        counted_cooldown = 1.0
+        counted_cooldown = 0.5
 
         start_time = time.time()
 
@@ -71,7 +71,7 @@ def count_cars():
 
             frame = np.frombuffer(raw_frame, np.uint8).reshape((height, width, 3))
 
-            line_y = int(height * 0.55)
+            line_y = int(height * 0.62)
 
             fgmask = subtractor.apply(frame)
             _, thresh = cv2.threshold(fgmask, 220, 255, cv2.THRESH_BINARY)
@@ -91,17 +91,17 @@ def count_cars():
             for contour in contours:
                 area = cv2.contourArea(contour)
 
-                if area < 1200:
+                if area < 350:
                     continue
 
                 x, y, w, h = cv2.boundingRect(contour)
 
-                if w < 35 or h < 25:
+                if w < 20 or h < 15:
                     continue
 
                 center_y = y + h // 2
 
-                if abs(center_y - line_y) < 15:
+                if abs(center_y - line_y) < 45:
                     if now - last_count_time >= counted_cooldown:
                         vehicle_count += 1
                         last_count_time = now
