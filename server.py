@@ -1,6 +1,9 @@
 from flask import Flask, request, jsonify
 import cv2
 import time
+import subprocess
+import numpy as np
+import imageio_ffmpeg
 
 app = Flask(__name__)
 
@@ -10,85 +13,115 @@ def home():
 
 @app.route("/count", methods=["POST"])
 def count_cars():
-    data = request.json or {}
+    try:
+        data = request.json or {}
 
-    video_url = data.get("video_url")
-    duration = int(data.get("duration", 30))
+        video_url = data.get("video_url")
+        duration = int(data.get("duration", 20))
 
-    if not video_url:
-        return jsonify({
-            "success": False,
-            "error": "video_url 없음"
-        })
+        if not video_url:
+            return jsonify({
+                "success": False,
+                "error": "video_url 없음"
+            })
 
-    cap = cv2.VideoCapture(video_url)
+        width = 640
+        height = 360
+        fps = 5
+        frame_size = width * height * 3
 
-    if not cap.isOpened():
-        return jsonify({
-            "success": False,
-            "error": "영상 열기 실패"
-        })
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
-    subtractor = cv2.createBackgroundSubtractorMOG2(
-        history=300,
-        varThreshold=40,
-        detectShadows=True
-    )
+        cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-headers", "User-Agent: Mozilla/5.0\r\n",
+            "-i", video_url,
+            "-vf", f"fps={fps},scale={width}:{height}",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "pipe:1"
+        ]
 
-    vehicle_count = 0
-    last_count_time = 0
-    start_time = time.time()
-
-    counted_cooldown = 1.2
-
-    while time.time() - start_time < duration:
-        ret, frame = cap.read()
-
-        if not ret:
-            time.sleep(0.2)
-            continue
-
-        frame = cv2.resize(frame, (640, 360))
-        height, width = frame.shape[:2]
-
-        line_y = int(height * 0.55)
-
-        fgmask = subtractor.apply(frame)
-        _, thresh = cv2.threshold(fgmask, 220, 255, cv2.THRESH_BINARY)
-
-        contours, _ = cv2.findContours(
-            thresh,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10**8
         )
 
-        now = time.time()
+        subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=120,
+            varThreshold=45,
+            detectShadows=True
+        )
 
-        for contour in contours:
-            area = cv2.contourArea(contour)
+        vehicle_count = 0
+        last_count_time = 0
+        counted_cooldown = 1.0
 
-            if area < 900:
-                continue
+        start_time = time.time()
 
-            x, y, w, h = cv2.boundingRect(contour)
+        while time.time() - start_time < duration:
+            raw_frame = process.stdout.read(frame_size)
 
-            if w < 25 or h < 20:
-                continue
+            if len(raw_frame) != frame_size:
+                break
 
-            center_y = y + h // 2
+            frame = np.frombuffer(raw_frame, np.uint8).reshape((height, width, 3))
 
-            if abs(center_y - line_y) < 12:
-                if now - last_count_time >= counted_cooldown:
-                    vehicle_count += 1
-                    last_count_time = now
+            line_y = int(height * 0.55)
 
-    cap.release()
+            fgmask = subtractor.apply(frame)
+            _, thresh = cv2.threshold(fgmask, 220, 255, cv2.THRESH_BINARY)
 
-    return jsonify({
-        "success": True,
-        "vehicle_count": vehicle_count,
-        "duration": duration
-    })
+            kernel = np.ones((5, 5), np.uint8)
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+            thresh = cv2.dilate(thresh, kernel, iterations=2)
+
+            contours, _ = cv2.findContours(
+                thresh,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            now = time.time()
+
+            for contour in contours:
+                area = cv2.contourArea(contour)
+
+                if area < 1200:
+                    continue
+
+                x, y, w, h = cv2.boundingRect(contour)
+
+                if w < 35 or h < 25:
+                    continue
+
+                center_y = y + h // 2
+
+                if abs(center_y - line_y) < 15:
+                    if now - last_count_time >= counted_cooldown:
+                        vehicle_count += 1
+                        last_count_time = now
+
+        try:
+            process.kill()
+        except:
+            pass
+
+        return jsonify({
+            "success": True,
+            "vehicle_count": vehicle_count,
+            "duration": duration
+        })
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
